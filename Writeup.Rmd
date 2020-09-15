@@ -1,0 +1,348 @@
+---
+title: "Activity Recognition of Weight Lifting Exercises"
+author: "Kanwar Ram"
+date: "9/15/2020"
+output:
+  html_document: default
+
+---
+
+# Introduction    
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.  
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+```{r,warning=FALSE,message=FALSE,include=FALSE,echo=FALSE}
+# Libraries used
+
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(caret)
+library(knitr)
+library(corrplot)
+library(plotly)
+library(correlationfunnel)
+library(GGally)
+library(e1071)
+library(doParallel)
+library(magrittr)
+library(party)
+library(randomForest)
+library(rattle)
+
+```
+
+# Data   
+
+## Loading data  
+
+```{r}
+TrainSet <- read.csv("pml-training.csv", stringsAsFactors = F,na.strings = c("","NA","#DIV/0!"))
+TestSet <- read.csv("pml-testing.csv", stringsAsFactors = F,na.strings = c("","NA","#DIV/0!"))
+dim(TrainSet); dim(TestSet)
+```
+  
+Validation Model:  
+
+```{r}
+set.seed(101)
+inTrain <- createDataPartition(TrainSet$classe, p = 0.8, list = F)
+DatValue <- TrainSet[-inTrain,]
+TrainSet <- TrainSet[inTrain,]
+dim(TrainSet); dim(DatValue)
+```
+  
+
+```{r}
+table(TrainSet$classe)/nrow(TrainSet)
+```
+  
+The data is not much baised with respect to different classes  
+
+## Missing Data 
+
+
+
+### Belt  
+
+For Belt sensor:  
+
+```{r}
+belt_miss <- sapply(select(TrainSet,names(TrainSet)[grepl("_belt",names(TrainSet))]),
+                    function(x) sum(is.na(x)))
+belt_miss
+```
+
+### Arm  
+
+For Arm sensor:  
+
+```{r}
+arm_miss <- sapply(select(TrainSet,names(TrainSet)[grepl("_arm",names(TrainSet))]),
+                   function(x) sum(is.na(x)))
+arm_miss
+```  
+
+### Forearm  
+
+For Forearm sensor:  
+
+```{r}
+forearm_miss <- sapply(select(TrainSet,
+                              names(TrainSet)[grepl("_forearm",names(TrainSet))]),
+                       function(x) sum(is.na(x)))
+forearm_miss
+```  
+
+### Dumbbell  
+
+For Dumbbell sensor:  
+
+```{r}
+dumbbell_miss <- sapply(select(TrainSet,
+                               names(TrainSet)[grepl("_dumbbell",names(TrainSet))]),
+                        function(x) sum(is.na(x)))
+dumbbell_miss
+``` 
+
+Few of the features are over 90% missing therefore it is better to drop those, after the drop there are 52 predictors left. 
+
+```{r}
+column_2drop <- c(names(belt_miss[belt_miss != 0]), 
+                  names(arm_miss[arm_miss != 0]),
+                  names(forearm_miss[forearm_miss != 0]),
+                  names(dumbbell_miss[dumbbell_miss != 0]))
+length(column_2drop)
+```
+
+
+# Analysis  
+
+```{r}
+#dropping the cols
+Anaylsis <- tbl_df(TrainSet %>%  select(-column_2drop,
+                             -c(X,user_name, raw_timestamp_part_1, 
+                                raw_timestamp_part_2, cvtd_timestamp, 
+                                new_window,num_window)))
+Anaylsis$classe <- as.factor(Anaylsis$classe)
+Anaylsis[,1:52] <- lapply(Anaylsis[,1:52],as.numeric)
+dim(Anaylsis)
+```
+
+## Correlation
+
+```{r,fig.height=10,fig.width=10}
+corr_col <- cor(select(Anaylsis, -classe))
+diag(corr_col) <- 0
+corr_col <- which(abs(corr_col)>0.8,arr.ind = T)
+corr_col <- unique(row.names(corr_col))
+corrplot(cor(select(Anaylsis,corr_col)),
+         type="upper", order="hclust",method = "number")
+```
+Correlation plot makes it clear that there are a lot of columns that are highly correlated and high correlation is only seen between the same sensor i.e. "belt","arm","forearm" and "dumbbell".   
+
+## Targeted Correlation  
+
+We use **correlationfunnel::correlate** to see the correlation with each level of"classe" and other features
+
+```{r}
+correlation_funl_df <- Anaylsis %>% binarize(n_bins = 4, thresh_infreq = 0.01)
+```
+
+### classe__A  
+
+```{r,fig.align="center",fig.width=8,fig.height=10}
+correlation_a <- correlation_funl_df %>% correlate(target = classe__A) 
+correlation_a %>% plot_correlation_funnel(interactive = T,limits = c(-0.5,0.5))
+```
+
+For *classe__A* the "Arm and Forearm" sensors are more important.  
+
+```{r, echo=FALSE, eval=FALSE}
+temp_a <- head(correlation_a %>% mutate(correlation = abs(correlationelation)) %>% 
+  arrange(desc(correlation)) %>% select(feature) %>% unique(),20)
+temp_a$feature[which(temp_a$feature %in% correlation_col)]
+```
+
+* "accel_arm_x" is correlated with "magnet_arm_x" and "gyros_arm_y" is correlated with "gyros_arm_x", so they wont be considered.
+* Top 5 significant features for "classe__A" are - (magnet_arm_x, pitch_forearm , magnet_dumbbell_y, roll_forearm, gyros_dumbbell_y)  
+
+### classe__B  
+
+```{r,fig.align="center",fig.width=8,fig.height=10}
+correlation_b <- correlation_funl_df %>% correlate(target = classe__B)
+correlation_b %>% plot_correlation_funnel(interactive = T,limits = c(-0.5,0.5))
+```
+
+For *classe__B* the "Dumbbell and Belt" sensors are more important.  
+
+```{r, echo=FALSE, eval=FALSE}
+# this section is to find the top features for this classe which are not correlated with others
+temp_b <- head(correlation_b %>% mutate(correlation = abs(correlationelation)) %>% 
+  arrange(desc(correlation)) %>% select(feature) %>% unique(),20)
+temp_b$feature[which(temp_b$feature %in% correlation_col)]
+```
+
+* Top 5 significant features for "classe__A" are - (magnet_dumbbell_y, magnet_dumbbell_x , roll_dumbbell , magnet_belt_y , accel_dumbbell_x )   
+
+### classe__C  
+
+```{r,fig.align="center",fig.width=8,fig.height=10}
+correlation_c <- correlation_funl_df %>% correlate(target = classe__C)
+correlation_c %>% plot_correlation_funnel(interactive = T,limits = c(-0.5,0.5))
+```
+
+For *classe__C* the "Dumbbell" sensors are more important.  
+
+```{r, echo=FALSE, eval=FALSE}
+
+temp_c <- head(correlation_c %>% mutate(correlation = abs(correlationelation)) %>% 
+  arrange(desc(correlation)) %>% select(feature) %>% unique(),20)
+temp_c$feature[which(temp_c$feature %in% correlation_col)]
+```
+
+* Top 5 significant features for "classe__A" are - (magnet_dumbbell_y, roll_dumbbell , accel_dumbbell_y , magnet_dumbbell_x, magnet_dumbbell_z)   
+
+### classe__D  
+
+```{r,fig.align="center",fig.width=8,fig.height=10}
+correlation_d <- correlation_funl_df %>% correlate(target = classe__D)
+correlation_d %>% plot_correlation_funnel(interactive = T,limits = c(-0.5,0.5))
+```
+
+For *classe__D* the "Forearm, Arm and Dumbbell" sensors are more important.  
+
+```{r, echo=FALSE, eval=FALSE}
+# this section is to find the top features for this classe which are not correlated with others
+temp_d <- head(correlation_d %>% mutate(correlation = abs(correlationelation)) %>% 
+  arrange(desc(correlation)) %>% select(feature) %>% unique(),20)
+temp_d$feature[which(temp_d$feature %in% correlation_col)]
+```
+
+* Top 5 significant features for "classe__A" are - (pitch_forearm , magnet_arm_y , magnet_forearm_x, accel_dumbbell_y, accel_forearm_x)  
+
+### classe__E  
+
+```{r,fig.align="center",fig.width=8,fig.height=10}
+correlation_e <- correlation_funl_df %>% correlate(target = classe__E)
+correlation_e %>% plot_correlation_funnel(interactive = T,limits = c(-0.5,0.5))
+```
+
+For *classe__E* the "Belt" sensors are more important.  
+
+```{r, echo=FALSE, eval=FALSE}
+# this section is to find the top features for this classe which are not correlated with others
+temp_e <- head(correlation_e %>% mutate(correlation = abs(correlationelation)) %>% 
+  arrange(desc(correlation)) %>% select(feature) %>% unique(),20)
+temp_e$feature[which(temp_e$feature %in% correlation_col)]
+```
+
+* "total_accel_belt" is correlated with "roll_belt" ,"yaw_belt" is correlated with "roll_belt" ,"accel_belt_z" is correlated with "roll_belt", so we wont consider them.
+* Top 5 significant features for "classe__A" are - (magnet_belt_y , magnet_belt_z , roll_belt, gyros_belt_z , magnet_dumbbell_y)  
+
+
+
+## Plots  
+Top 5 features are presented in these columns 
+
+```{r}
+
+col_a <- c("magnet_arm_x", "pitch_forearm" , "magnet_dumbbell_y", 
+           "roll_forearm", "gyros_dumbbell_y") 
+col_b <- c("magnet_dumbbell_y", "magnet_dumbbell_x" , "roll_dumbbell" , 
+           "magnet_belt_y" , "accel_dumbbell_x" )
+col_c <- c("magnet_dumbbell_y", "roll_dumbbell" , "accel_dumbbell_y" , 
+           "magnet_dumbbell_x", "magnet_dumbbell_z")
+col_d <- c("pitch_forearm" , "magnet_arm_y" , "magnet_forearm_x",
+           "accel_dumbbell_y", "accel_forearm_x")
+col_e <- c("magnet_belt_y" , "magnet_belt_z" , "roll_belt", 
+           "gyros_belt_z" , "magnet_dumbbell_y")
+final_cols <- character()
+for(c in c(col_a,col_b,col_c,col_d,col_e)){
+  final_cols <- union(final_cols, c)
+}
+Anaylsis2 <- Anaylsis %>% select(final_cols, classe)
+data.frame("arm" = sum(grepl("_arm",final_cols)), 
+           "forearm" = sum(grepl("_forearm",final_cols)),
+           "belt" = sum(grepl("_belt",final_cols)),
+           "dumbbell" = sum(grepl("_dumbbell",final_cols)))
+TrainSet <- TrainSet %>%  select(final_cols,classe)
+DatValue <- DatValue %>%  select(final_cols,classe)
+TrainSet[,1:17] <- sapply(TrainSet[,1:17],as.numeric)
+DatValue[,1:17] <- sapply(DatValue[,1:17],as.numeric)
+levels <- c("A", "B", "C", "D", "E")
+preprop_obj <- preProcess(TrainSet[,-18],method = c("center","scale","BoxCox"))
+xTrain <- predict(preprop_obj,select(TrainSet,-classe))
+yTrain <- factor(TrainSet$classe,levels=levels)
+xVal <- predict(preprop_obj,select(DatValue,-classe))
+yVal <- factor(DatValue$classe,levels=levels)
+trControl <- trainControl(method="cv", number=5)
+```
+Dumbbell sensor turned out to be the most important sensor among the 4
+
+### Pairs plot  
+
+```{r, fig.align="center",fig.height=15,fig.width=15}
+my_dens <- function(data, mapping, ...) {
+  ggplot(data = data, mapping=mapping) +
+    geom_density(..., alpha = 0.3)+scale_fill_brewer(palette="Set2") 
+}
+my_point <- function(data, mapping, ...) {
+  ggplot(data = data, mapping=mapping) +
+    geom_point(..., alpha = 0.1)+ scale_fill_brewer(palette="Set2") 
+}
+ggpairs(Anaylsis2, columns = 1:5,aes(color = classe),
+        lower = list(continuous = my_point),diag = list(continuous = my_dens))
+```
+
+```{r,fig.align="center",fig.height=15,fig.width=15}
+ggpairs(Anaylsis2, columns = 6:10,aes(color = classe),
+        lower = list(continuous = my_point),diag = list(continuous = my_dens))
+```
+
+```{r,fig.align="center",fig.height=15,fig.width=15}
+ggpairs(Anaylsis2, columns = 11:17,aes(color = classe),
+        lower = list(continuous = my_point),diag = list(continuous = my_dens))
+```
+
+Most of the features are very skewed, so as a preprocessing step we have to "center", "rescale" and use "BoxCox" the features.  
+
+# Modelling 
+## Random Forest  
+```{r}
+modelRF <- train(x = xTrain,y = yTrain, 
+                 method = "rf", trControl = trControl,verbose=FALSE, metric = "Accuracy")
+confusionMatrix(predict(modelRF,xVal),yVal)
+```
+
+```{r}
+plot(modelRF$finalModel,main="Error VS no of tree")
+```
+
+Random Forest 98%+ accuracy was the highest.
+
+
+## Classification Tree  
+
+```{r}
+modelCT <- train(x = xTrain,y = yTrain, 
+                 method = "rpart", trControl = trControl)
+confusionMatrix(predict(modelCT,xVal),yVal)
+```
+
+Classification tree's accuracy is very low.
+
+
+## SVM  
+
+```{r}
+modelSVM <- svm(x = xTrain,y = yTrain,
+                kernel = "polynomial", cost = 10)
+confusionMatrix(predict(modelSVM,xVal),yVal)
+```
+It worked great but RM was better
+
+# Results  
+
+So from the above analysis it is clear that Random Forest is taking the lead in term of prediction. 
